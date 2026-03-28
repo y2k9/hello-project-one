@@ -2,14 +2,13 @@
 
 interface SpotifyTrack {
   id: string;
-  popularity: number;
+  popularity: number | null;
   artists: { id: string }[];
 }
 
 interface SpotifyArtist {
   id: string;
   genres: string[];
-  popularity: number;
 }
 
 interface PlayHistoryItem {
@@ -86,23 +85,14 @@ async function fetchTopTracks(
   return data?.items ?? [];
 }
 
-async function fetchTopArtists(
-  token: string,
-  timeRange: string
-): Promise<SpotifyArtist[]> {
-  const data = await spotifyGet<{ items: SpotifyArtist[] }>(
-    `https://api.spotify.com/v1/me/top/artists?time_range=${timeRange}&limit=50`,
-    token
-  );
-  return data?.items ?? [];
-}
-
-// Batch-fetch full artist objects (includes genres) for a list of IDs.
+// Batch-fetch full artist objects (genres, popularity) for a list of IDs.
+// Uses /artists?ids= which is more reliable for genre data than /me/top/artists.
 // Spotify allows up to 50 IDs per request.
 async function fetchArtistDetails(
   token: string,
   artistIds: string[]
 ): Promise<SpotifyArtist[]> {
+  if (artistIds.length === 0) return [];
   const results: SpotifyArtist[] = [];
   for (let i = 0; i < artistIds.length; i += 50) {
     const batch = artistIds.slice(i, i + 50).join(",");
@@ -152,18 +142,11 @@ function genreEnergyScore(genre: string): number {
 export async function computeMusicDNA(
   token: string
 ): Promise<MusicDNAScores | null> {
-  // Fetch all sources in parallel
-  const [
-    shortTracks, medTracks, longTracks,
-    shortArtists, medArtists, longArtists,
-    recentPlays,
-  ] = await Promise.all([
+  // Step 1: fetch top tracks (all time ranges) + recently played in parallel
+  const [shortTracks, medTracks, longTracks, recentPlays] = await Promise.all([
     fetchTopTracks(token, "short_term"),
     fetchTopTracks(token, "medium_term"),
     fetchTopTracks(token, "long_term"),
-    fetchTopArtists(token, "short_term"),
-    fetchTopArtists(token, "medium_term"),
-    fetchTopArtists(token, "long_term"),
     fetchRecentlyPlayed(token),
   ]);
 
@@ -174,32 +157,28 @@ export async function computeMusicDNA(
 
   const allTracks = dedupById([...shortTracks, ...medTracks, ...longTracks]);
 
-  // Filter out any tracks missing popularity (Spotify occasionally omits it)
-  const popularities = allTracks
-    .map((t) => t.popularity)
-    .filter((p): p is number => typeof p === "number" && !isNaN(p));
-
-  // Build artist list from top artists; fall back to fetching artists from
-  // top tracks if top-artists API returned nothing (e.g. sparse history).
-  let allArtists = dedupById([...shortArtists, ...medArtists, ...longArtists]);
-  if (allArtists.length === 0) {
-    const artistIds = [
-      ...new Set(
-        allTracks.flatMap((t) => t.artists?.map((a) => a.id) ?? [])
-      ),
-    ];
-    allArtists = await fetchArtistDetails(token, artistIds);
-  }
-
-  const allGenres = allArtists
-    .flatMap((a) => a.genres ?? [])
-    .filter((g): g is string => typeof g === "string" && g.length > 0);
+  // Step 2: fetch artist details using IDs from the tracks themselves.
+  // /artists?ids= is more reliable for genre data than /me/top/artists.
+  const artistIds = [
+    ...new Set(
+      allTracks.flatMap((t) => t.artists?.map((a) => a.id) ?? [])
+    ),
+  ];
+  const artists = await fetchArtistDetails(token, artistIds);
 
   // ── TASTE: mainstream vs offbeat ──────────────────────────────────────────
+  // popularity can be null in the API; default missing values to 50 (neutral)
+  // so absent data doesn't distort the score toward either extreme.
+  const popularities = allTracks.map((t) =>
+    typeof t.popularity === "number" && !isNaN(t.popularity) ? t.popularity : 50
+  );
   const avgPopularity = mean(popularities);
   const taste = 1 - normalize(avgPopularity, 0, 100);
 
   // ── RANGE: focused vs wide ────────────────────────────────────────────────
+  const allGenres = artists
+    .flatMap((a) => a.genres ?? [])
+    .filter((g): g is string => typeof g === "string" && g.length > 0);
   const uniqueGenres = new Set(allGenres);
   const genre_score = clamp(uniqueGenres.size / 25, 0, 1);
   const spread_score = normalize(stdDev(popularities), 0, 35);
