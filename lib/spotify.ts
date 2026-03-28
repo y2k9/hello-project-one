@@ -3,6 +3,7 @@
 interface SpotifyTrack {
   id: string;
   popularity: number;
+  artists: { id: string }[];
 }
 
 interface SpotifyArtist {
@@ -96,6 +97,24 @@ async function fetchTopArtists(
   return data?.items ?? [];
 }
 
+// Batch-fetch full artist objects (includes genres) for a list of IDs.
+// Spotify allows up to 50 IDs per request.
+async function fetchArtistDetails(
+  token: string,
+  artistIds: string[]
+): Promise<SpotifyArtist[]> {
+  const results: SpotifyArtist[] = [];
+  for (let i = 0; i < artistIds.length; i += 50) {
+    const batch = artistIds.slice(i, i + 50).join(",");
+    const data = await spotifyGet<{ artists: SpotifyArtist[] }>(
+      `https://api.spotify.com/v1/artists?ids=${batch}`,
+      token
+    );
+    if (data?.artists) results.push(...data.artists.filter(Boolean));
+  }
+  return results;
+}
+
 async function fetchRecentlyPlayed(token: string): Promise<PlayHistoryItem[]> {
   const data = await spotifyGet<{ items: PlayHistoryItem[] }>(
     "https://api.spotify.com/v1/me/player/recently-played?limit=50",
@@ -133,7 +152,7 @@ function genreEnergyScore(genre: string): number {
 export async function computeMusicDNA(
   token: string
 ): Promise<MusicDNAScores | null> {
-  // All 7 calls in parallel
+  // Fetch all sources in parallel
   const [
     shortTracks, medTracks, longTracks,
     shortArtists, medArtists, longArtists,
@@ -148,45 +167,57 @@ export async function computeMusicDNA(
     fetchRecentlyPlayed(token),
   ]);
 
-  // No top tracks = token is missing user-top-read scope, needs re-auth
+  // No top tracks = missing user-top-read scope, needs re-auth
   if (!shortTracks.length && !medTracks.length && !longTracks.length) {
     return null;
   }
 
   const allTracks = dedupById([...shortTracks, ...medTracks, ...longTracks]);
-  const allArtists = dedupById([...shortArtists, ...medArtists, ...longArtists]);
-  const allGenres = allArtists.flatMap((a) => a.genres ?? []).filter(Boolean);
 
-  // ── TASTE: how mainstream vs offbeat ──────────────────────────────────────
-  // track.popularity (0–100) is on every track object, no extra API call.
-  // Mean across all 150 deduplicated tracks, then invert so 1 = offbeat.
-  const avgPopularity = mean(allTracks.map((t) => t.popularity));
+  // Filter out any tracks missing popularity (Spotify occasionally omits it)
+  const popularities = allTracks
+    .map((t) => t.popularity)
+    .filter((p): p is number => typeof p === "number" && !isNaN(p));
+
+  // Build artist list from top artists; fall back to fetching artists from
+  // top tracks if top-artists API returned nothing (e.g. sparse history).
+  let allArtists = dedupById([...shortArtists, ...medArtists, ...longArtists]);
+  if (allArtists.length === 0) {
+    const artistIds = [
+      ...new Set(
+        allTracks.flatMap((t) => t.artists?.map((a) => a.id) ?? [])
+      ),
+    ];
+    allArtists = await fetchArtistDetails(token, artistIds);
+  }
+
+  const allGenres = allArtists
+    .flatMap((a) => a.genres ?? [])
+    .filter((g): g is string => typeof g === "string" && g.length > 0);
+
+  // ── TASTE: mainstream vs offbeat ──────────────────────────────────────────
+  const avgPopularity = mean(popularities);
   const taste = 1 - normalize(avgPopularity, 0, 100);
 
-  // ── RANGE: how varied vs focused ──────────────────────────────────────────
-  // Primary: unique genre count across all top artists (25+ = max range).
-  // Secondary: std dev of track popularities — mixing mainstream + niche = wide range.
+  // ── RANGE: focused vs wide ────────────────────────────────────────────────
   const uniqueGenres = new Set(allGenres);
   const genre_score = clamp(uniqueGenres.size / 25, 0, 1);
-  const spread_score = normalize(stdDev(allTracks.map((t) => t.popularity)), 0, 35);
+  const spread_score = normalize(stdDev(popularities), 0, 35);
   const range = 0.7 * genre_score + 0.3 * spread_score;
 
   // ── ENERGY: chill vs pumped ───────────────────────────────────────────────
-  // Genre names are the only proxy available without audio features.
-  // Score each genre tag -1/0/+1, take mean, normalize from [-1,1] to [0,1].
   const energyScores = allGenres.map(genreEnergyScore);
-  const energy = normalize(mean(energyScores), -1, 1);
+  const energy = energyScores.length > 0
+    ? normalize(mean(energyScores), -1, 1)
+    : 0.5;
 
   // ── DEPTH: repeat listener vs explorer ────────────────────────────────────
-  // Primary (65%): overlap between short_term and long_term top tracks.
-  // High overlap = same songs loved for years = repeat listener (low depth).
   const shortIds = new Set(shortTracks.map((t) => t.id));
   const longIds = new Set(longTracks.map((t) => t.id));
   const overlap = [...shortIds].filter((id) => longIds.has(id)).length;
   const minSize = Math.min(shortIds.size, longIds.size);
   const cross_depth = minSize > 0 ? 1 - overlap / minSize : 0.5;
 
-  // Secondary (35%): unique tracks / total plays from recently played.
   const totalPlays = recentPlays.length;
   const uniqueRecent = new Set(recentPlays.map((i) => i.track.id)).size;
   const recent_depth = totalPlays > 0 ? uniqueRecent / totalPlays : 0.5;
