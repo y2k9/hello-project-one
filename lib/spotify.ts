@@ -1,72 +1,65 @@
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-interface PlayHistoryItem {
-  track: {
-    id: string;
-    artists: { id: string }[];
-  };
-  played_at: string;
-}
-
-interface PlayHistoryPage {
-  items: PlayHistoryItem[];
-  next: string | null;
-}
-
-interface AudioFeatures {
+interface SpotifyTrack {
   id: string;
-  energy: number;   // 0–1
-  tempo: number;    // BPM
-  valence: number;  // 0–1
+  popularity: number;
 }
 
-export interface MusicDNARaw {
-  energy_avg: number;
-  tempo_avg: number;
-  valence_avg: number;
-  popularity_avg: number;
-  unique_tracks: number;
-  total_plays: number;
-  repeat_rate: number;
-  feature_variance: number;
+interface SpotifyArtist {
+  id: string;
+  genres: string[];
+  popularity: number;
+}
+
+interface PlayHistoryItem {
+  track: { id: string };
 }
 
 export interface MusicDNAScores {
-  raw: MusicDNARaw;
-  energy_score: number;
-  tempo_score: number;
-  valence_score: number;
-  popularity_score: number;
-  depth_score: number;
-  range_score: number;
-  final_energy: number;
+  taste: number;  // 0 = mainstream, 1 = offbeat
+  range: number;  // 0 = focused, 1 = wide
+  energy: number; // 0 = chill, 1 = pumped
+  depth: number;  // 0 = repeat listener, 1 = explorer
+  meta: {
+    total_tracks: number;
+    unique_genres: number;
+    total_plays: number;
+    unique_recent: number;
+  };
 }
 
 // ─── Math helpers ─────────────────────────────────────────────────────────────
 
-function clamp(val: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, val));
+function clamp(v: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, v));
 }
 
-function normalize(val: number, min: number, max: number): number {
-  return clamp((val - min) / (max - min), 0, 1);
+function normalize(v: number, min: number, max: number): number {
+  return clamp((v - min) / (max - min), 0, 1);
 }
 
-function mean(values: number[]): number {
-  return values.reduce((a, b) => a + b, 0) / values.length;
+function mean(arr: number[]): number {
+  return arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
 }
 
-function variance(values: number[]): number {
-  const avg = mean(values);
-  return mean(values.map((v) => Math.pow(v - avg, 2)));
+function stdDev(arr: number[]): number {
+  if (arr.length < 2) return 0;
+  const avg = mean(arr);
+  return Math.sqrt(mean(arr.map((v) => Math.pow(v - avg, 2))));
 }
 
-// ─── Spotify API calls ────────────────────────────────────────────────────────
+function dedupById<T extends { id: string }>(arr: T[]): T[] {
+  const seen = new Set<string>();
+  return arr.filter((item) => {
+    if (seen.has(item.id)) return false;
+    seen.add(item.id);
+    return true;
+  });
+}
 
-async function spotifyGet<T>(
-  url: string,
-  token: string
-): Promise<T | null> {
+// ─── Spotify fetch helper ─────────────────────────────────────────────────────
+
+async function spotifyGet<T>(url: string, token: string): Promise<T | null> {
   const res = await fetch(url, {
     headers: { Authorization: `Bearer ${token}` },
     cache: "no-store",
@@ -75,128 +68,137 @@ async function spotifyGet<T>(
   return (await res.json()) as T;
 }
 
-// Fetch up to 3 pages of recently played (max ~150 items)
-async function fetchPlayHistory(token: string): Promise<PlayHistoryItem[]> {
-  const items: PlayHistoryItem[] = [];
-  let url: string | null =
-    "https://api.spotify.com/v1/me/player/recently-played?limit=50";
+// ─── API calls ────────────────────────────────────────────────────────────────
 
-  for (let page = 0; page < 3 && url !== null; page++) {
-    const data: PlayHistoryPage | null = await spotifyGet<PlayHistoryPage>(url, token);
-    if (!data) break;
-    items.push(...data.items);
-    url = data.next;
-  }
-  return items;
+async function fetchTopTracks(
+  token: string,
+  timeRange: string
+): Promise<SpotifyTrack[]> {
+  const data = await spotifyGet<{ items: SpotifyTrack[] }>(
+    `https://api.spotify.com/v1/me/top/tracks?time_range=${timeRange}&limit=50`,
+    token
+  );
+  return data?.items ?? [];
 }
 
-// Fetch audio features for up to 100 tracks per request
-async function fetchAudioFeatures(
+async function fetchTopArtists(
   token: string,
-  trackIds: string[]
-): Promise<AudioFeatures[]> {
-  const features: AudioFeatures[] = [];
-  for (let i = 0; i < trackIds.length; i += 100) {
-    const batch = trackIds.slice(i, i + 100).join(",");
-    const data = await spotifyGet<{ audio_features: (AudioFeatures | null)[] }>(
-      `https://api.spotify.com/v1/audio-features?ids=${batch}`,
-      token
-    );
-    if (data?.audio_features) {
-      features.push(...data.audio_features.filter((f): f is AudioFeatures => f !== null));
-    }
-  }
-  return features;
+  timeRange: string
+): Promise<SpotifyArtist[]> {
+  const data = await spotifyGet<{ items: SpotifyArtist[] }>(
+    `https://api.spotify.com/v1/me/top/artists?time_range=${timeRange}&limit=50`,
+    token
+  );
+  return data?.items ?? [];
 }
 
-// Fetch artist popularity for up to 50 artists per request
-async function fetchArtistPopularities(
-  token: string,
-  artistIds: string[]
-): Promise<number[]> {
-  const popularities: number[] = [];
-  for (let i = 0; i < artistIds.length; i += 50) {
-    const batch = artistIds.slice(i, i + 50).join(",");
-    const data = await spotifyGet<{
-      artists: { popularity: number }[];
-    }>(`https://api.spotify.com/v1/artists?ids=${batch}`, token);
-    if (data?.artists) {
-      popularities.push(...data.artists.filter(Boolean).map((a) => a.popularity));
-    }
-  }
-  return popularities;
+async function fetchRecentlyPlayed(token: string): Promise<PlayHistoryItem[]> {
+  const data = await spotifyGet<{ items: PlayHistoryItem[] }>(
+    "https://api.spotify.com/v1/me/player/recently-played?limit=50",
+    token
+  );
+  return data?.items ?? [];
+}
+
+// ─── Energy keyword mapping ───────────────────────────────────────────────────
+
+const HIGH_ENERGY = [
+  "metal", "punk", "hardcore", "edm", "house", "techno", "drum and bass",
+  "dnb", "trap", "drill", "rave", "hardstyle", "trance", "industrial",
+  "grunge", "rock", "hip hop", "rap", "rage", "breakbeat", "jungle",
+  "gabber", "psytrance", "speed metal", "thrash", "death metal", "black metal",
+  "dubstep", "bass", "club", "dance",
+];
+
+const LOW_ENERGY = [
+  "ambient", "acoustic", "classical", "folk", "sleep", "meditation",
+  "lo-fi", "lofi", "soft", "singer-songwriter", "new age", "piano",
+  "choral", "lullaby", "chill", "orchestral", "chamber", "baroque",
+  "impressionist", "slowcore", "drone", "post-classical",
+];
+
+function genreEnergyScore(genre: string): number {
+  const g = genre.toLowerCase();
+  if (HIGH_ENERGY.some((k) => g.includes(k))) return 1;
+  if (LOW_ENERGY.some((k) => g.includes(k))) return -1;
+  return 0;
 }
 
 // ─── Main computation ─────────────────────────────────────────────────────────
 
-export async function computeMusicDNA(token: string): Promise<MusicDNAScores> {
-  // 1. Play history
-  const history = await fetchPlayHistory(token);
-  const total_plays = history.length;
-
-  const allTrackIds = history.map((item) => item.track.id);
-  const uniqueTrackIds = [...new Set(allTrackIds)];
-  const unique_tracks = uniqueTrackIds.length;
-  const repeat_rate = 1 - unique_tracks / total_plays;
-
-  // Unique first-artist IDs for popularity lookup
-  const uniqueArtistIds = [
-    ...new Set(
-      history
-        .map((item) => item.track.artists[0]?.id)
-        .filter((id): id is string => Boolean(id))
-    ),
-  ];
-
-  // 2. Fetch audio features + artist popularities in parallel
-  const [features, artistPopularities] = await Promise.all([
-    fetchAudioFeatures(token, uniqueTrackIds),
-    fetchArtistPopularities(token, uniqueArtistIds),
+export async function computeMusicDNA(
+  token: string
+): Promise<MusicDNAScores | null> {
+  // All 7 calls in parallel
+  const [
+    shortTracks, medTracks, longTracks,
+    shortArtists, medArtists, longArtists,
+    recentPlays,
+  ] = await Promise.all([
+    fetchTopTracks(token, "short_term"),
+    fetchTopTracks(token, "medium_term"),
+    fetchTopTracks(token, "long_term"),
+    fetchTopArtists(token, "short_term"),
+    fetchTopArtists(token, "medium_term"),
+    fetchTopArtists(token, "long_term"),
+    fetchRecentlyPlayed(token),
   ]);
 
-  // 3. Raw averages
-  const energy_avg = mean(features.map((f) => f.energy));
-  const tempo_avg = mean(features.map((f) => f.tempo));
-  const valence_avg = mean(features.map((f) => f.valence));
-  const popularity_avg =
-    artistPopularities.length > 0 ? mean(artistPopularities) : 50;
+  // No top tracks = token is missing user-top-read scope, needs re-auth
+  if (!shortTracks.length && !medTracks.length && !longTracks.length) {
+    return null;
+  }
 
-  // 4. Feature variance (energy + valence + normalized tempo, averaged)
-  const normTempos = features.map((f) => normalize(f.tempo, 60, 180));
-  const feature_variance =
-    (variance(features.map((f) => f.energy)) +
-      variance(features.map((f) => f.valence)) +
-      variance(normTempos)) /
-    3;
+  const allTracks = dedupById([...shortTracks, ...medTracks, ...longTracks]);
+  const allArtists = dedupById([...shortArtists, ...medArtists, ...longArtists]);
+  const allGenres = allArtists.flatMap((a) => a.genres);
 
-  // 5. Normalize to 0–1
-  const energy_score = clamp(energy_avg, 0, 1);
-  const tempo_score = normalize(tempo_avg, 60, 180);
-  const valence_score = clamp(valence_avg, 0, 1);
-  const popularity_score = normalize(popularity_avg, 0, 100);
-  const depth_score = clamp(unique_tracks / total_plays, 0, 1);
-  // Divide by 0.04 so typical variance (0.008–0.032) maps to 0.2–0.8
-  const range_score = clamp(feature_variance / 0.04, 0, 1);
+  // ── TASTE: how mainstream vs offbeat ──────────────────────────────────────
+  // track.popularity (0–100) is on every track object, no extra API call.
+  // Mean across all 150 deduplicated tracks, then invert so 1 = offbeat.
+  const avgPopularity = mean(allTracks.map((t) => t.popularity));
+  const taste = 1 - normalize(avgPopularity, 0, 100);
 
-  const final_energy = 0.6 * energy_score + 0.4 * tempo_score;
+  // ── RANGE: how varied vs focused ──────────────────────────────────────────
+  // Primary: unique genre count across all top artists (25+ = max range).
+  // Secondary: std dev of track popularities — mixing mainstream + niche = wide range.
+  const uniqueGenres = new Set(allGenres);
+  const genre_score = clamp(uniqueGenres.size / 25, 0, 1);
+  const spread_score = normalize(stdDev(allTracks.map((t) => t.popularity)), 0, 35);
+  const range = 0.7 * genre_score + 0.3 * spread_score;
+
+  // ── ENERGY: chill vs pumped ───────────────────────────────────────────────
+  // Genre names are the only proxy available without audio features.
+  // Score each genre tag -1/0/+1, take mean, normalize from [-1,1] to [0,1].
+  const energyScores = allGenres.map(genreEnergyScore);
+  const energy = normalize(mean(energyScores), -1, 1);
+
+  // ── DEPTH: repeat listener vs explorer ────────────────────────────────────
+  // Primary (65%): overlap between short_term and long_term top tracks.
+  // High overlap = same songs loved for years = repeat listener (low depth).
+  const shortIds = new Set(shortTracks.map((t) => t.id));
+  const longIds = new Set(longTracks.map((t) => t.id));
+  const overlap = [...shortIds].filter((id) => longIds.has(id)).length;
+  const minSize = Math.min(shortIds.size, longIds.size);
+  const cross_depth = minSize > 0 ? 1 - overlap / minSize : 0.5;
+
+  // Secondary (35%): unique tracks / total plays from recently played.
+  const totalPlays = recentPlays.length;
+  const uniqueRecent = new Set(recentPlays.map((i) => i.track.id)).size;
+  const recent_depth = totalPlays > 0 ? uniqueRecent / totalPlays : 0.5;
+
+  const depth = 0.65 * cross_depth + 0.35 * recent_depth;
 
   return {
-    raw: {
-      energy_avg,
-      tempo_avg,
-      valence_avg,
-      popularity_avg,
-      unique_tracks,
-      total_plays,
-      repeat_rate,
-      feature_variance,
+    taste,
+    range,
+    energy,
+    depth,
+    meta: {
+      total_tracks: allTracks.length,
+      unique_genres: uniqueGenres.size,
+      total_plays: totalPlays,
+      unique_recent: uniqueRecent,
     },
-    energy_score,
-    tempo_score,
-    valence_score,
-    popularity_score,
-    depth_score,
-    range_score,
-    final_energy,
   };
 }

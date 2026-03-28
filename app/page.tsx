@@ -3,7 +3,7 @@ import { computeMusicDNA, MusicDNAScores } from "@/lib/spotify";
 import LoginButton from "./components/LoginButton";
 import LogoutButton from "./components/LogoutButton";
 
-// ─── Score bar component ───────────────────────────────────────────────────────
+// ─── Score bar ────────────────────────────────────────────────────────────────
 
 function ScoreBar({
   label,
@@ -20,8 +20,7 @@ function ScoreBar({
   fromColor: string;
   toColor: string;
 }) {
-  const isValid = !isNaN(value) && isFinite(value);
-  const pct = isValid ? Math.round(value * 100) : 0;
+  const pct = Math.round(value * 100);
 
   return (
     <div className="flex flex-col gap-2">
@@ -29,21 +28,17 @@ function ScoreBar({
         <span className="text-xs font-semibold uppercase tracking-widest text-white/50">
           {label}
         </span>
-        <span className="font-mono text-sm text-white/30">
-          {isValid ? pct : "–"}
-        </span>
+        <span className="font-mono text-sm text-white/30">{pct}</span>
       </div>
-
       <div className="h-[3px] w-full overflow-hidden rounded-full bg-white/10">
         <div
-          className="h-full rounded-full transition-all"
+          className="h-full rounded-full"
           style={{
             width: `${pct}%`,
             background: `linear-gradient(to right, ${fromColor}, ${toColor})`,
           }}
         />
       </div>
-
       <div className="flex justify-between">
         <span className="text-xs text-white/20">{low}</span>
         <span className="text-xs text-white/20">{high}</span>
@@ -52,83 +47,60 @@ function ScoreBar({
   );
 }
 
-// ─── Axis definitions ──────────────────────────────────────────────────────────
+// ─── Axis config ──────────────────────────────────────────────────────────────
 
-interface Axis {
+const AXES: {
   label: string;
   getValue: (s: MusicDNAScores) => number;
   low: string;
   high: string;
   from: string;
   to: string;
-}
-
-const AXES: Axis[] = [
-  {
-    label: "Energy",
-    getValue: (s) => s.final_energy,
-    low: "Chill",
-    high: "Pumped",
-    from: "#f59e0b",
-    to: "#ef4444",
-  },
-  {
-    label: "Mood",
-    getValue: (s) => s.valence_score,
-    low: "Dark",
-    high: "Euphoric",
-    from: "#6366f1",
-    to: "#ec4899",
-  },
+}[] = [
   {
     label: "Taste",
-    getValue: (s) => 1 - s.popularity_score,
-    low: "Mainstream",
+    getValue: (s) => s.taste,
+    low: "Pop",
     high: "Offbeat",
     from: "#06b6d4",
     to: "#14b8a6",
   },
   {
     label: "Range",
-    getValue: (s) => s.range_score,
+    getValue: (s) => s.range,
     low: "Focused",
     high: "Wide",
     from: "#3b82f6",
     to: "#8b5cf6",
   },
   {
+    label: "Energy",
+    getValue: (s) => s.energy,
+    low: "Chill",
+    high: "Pumped",
+    from: "#f59e0b",
+    to: "#ef4444",
+  },
+  {
     label: "Depth",
-    getValue: (s) => s.depth_score,
+    getValue: (s) => s.depth,
     low: "Repeat Listener",
     high: "Explorer",
     from: "#10b981",
     to: "#84cc16",
   },
-  {
-    label: "Tempo",
-    getValue: (s) => s.tempo_score,
-    low: "Slow",
-    high: "Fast",
-    from: "#f97316",
-    to: "#fbbf24",
-  },
-  {
-    label: "Raw Energy",
-    getValue: (s) => s.energy_score,
-    low: "Mellow",
-    high: "Intense",
-    from: "#e11d48",
-    to: "#fb7185",
-  },
 ];
 
-// ─── Pages ────────────────────────────────────────────────────────────────────
+// ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default async function Home() {
   const cookieStore = await cookies();
   const token = cookieStore.get("spotify_access_token")?.value;
 
-  if (!token) {
+  const scores = token ? await computeMusicDNA(token) : null;
+
+  // Not logged in, or token missing user-top-read scope (scores === null)
+  if (!scores) {
     return (
       <div
         className="flex min-h-screen flex-col items-center justify-center gap-8 px-4"
@@ -146,8 +118,6 @@ export default async function Home() {
       </div>
     );
   }
-
-  const scores = await computeMusicDNA(token);
 
   return (
     <div
@@ -180,9 +150,12 @@ export default async function Home() {
         ))}
       </div>
 
-      <div style={{ color: "rgba(255,255,255,0.2)", fontSize: "0.7rem" }}>
-        Based on your last {scores.raw.total_plays} plays · {scores.raw.unique_tracks} unique tracks
-      </div>
+      <p
+        className="text-center"
+        style={{ color: "rgba(255,255,255,0.2)", fontSize: "0.7rem" }}
+      >
+        {scores.meta.total_tracks} tracks · {scores.meta.unique_genres} genres
+      </p>
 
       <LogoutButton />
     </div>
