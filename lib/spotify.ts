@@ -155,7 +155,7 @@ export async function computeMusicDNA(
 
   const allTracks = dedupById([...shortTracks, ...medTracks, ...longTracks]);
   const allArtists = dedupById([...shortArtists, ...medArtists, ...longArtists]);
-  const allGenres = allArtists.flatMap((a) => a.genres);
+  const allGenres = allArtists.flatMap((a) => a.genres ?? []).filter(Boolean);
 
   // ── TASTE: how mainstream vs offbeat ──────────────────────────────────────
   // track.popularity (0–100) is on every track object, no extra API call.
