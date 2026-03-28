@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Saturday Morning",
-  description: "Your music taste, analyzed",
+  title: "Music DNA",
+  description: "Discover what your music says about you.",
 };
 
 export default function RootLayout({

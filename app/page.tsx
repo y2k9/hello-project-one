@@ -1,84 +1,190 @@
 import { cookies } from "next/headers";
-import Image from "next/image";
+import { computeMusicDNA, MusicDNAScores } from "@/lib/spotify";
 import LoginButton from "./components/LoginButton";
 import LogoutButton from "./components/LogoutButton";
 
-interface SpotifyTrack {
-  name: string;
-  artists: { name: string }[];
-  album: {
-    name: string;
-    images: { url: string; width: number; height: number }[];
-  };
-  external_urls: { spotify: string };
+// ─── Score bar component ───────────────────────────────────────────────────────
+
+function ScoreBar({
+  label,
+  value,
+  low,
+  high,
+  fromColor,
+  toColor,
+}: {
+  label: string;
+  value: number;
+  low: string;
+  high: string;
+  fromColor: string;
+  toColor: string;
+}) {
+  const isValid = !isNaN(value) && isFinite(value);
+  const pct = isValid ? Math.round(value * 100) : 0;
+
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex items-baseline justify-between">
+        <span className="text-xs font-semibold uppercase tracking-widest text-white/50">
+          {label}
+        </span>
+        <span className="font-mono text-sm text-white/30">
+          {isValid ? pct : "–"}
+        </span>
+      </div>
+
+      <div className="h-[3px] w-full overflow-hidden rounded-full bg-white/10">
+        <div
+          className="h-full rounded-full transition-all"
+          style={{
+            width: `${pct}%`,
+            background: `linear-gradient(to right, ${fromColor}, ${toColor})`,
+          }}
+        />
+      </div>
+
+      <div className="flex justify-between">
+        <span className="text-xs text-white/20">{low}</span>
+        <span className="text-xs text-white/20">{high}</span>
+      </div>
+    </div>
+  );
 }
 
-async function getRecentlyPlayed(token: string): Promise<SpotifyTrack | null> {
-  const res = await fetch(
-    "https://api.spotify.com/v1/me/player/recently-played?limit=1",
-    {
-      headers: { Authorization: `Bearer ${token}` },
-      cache: "no-store",
-    }
-  );
-  if (!res.ok) return null;
-  const data = await res.json();
-  return data.items?.[0]?.track ?? null;
+// ─── Axis definitions ──────────────────────────────────────────────────────────
+
+interface Axis {
+  label: string;
+  getValue: (s: MusicDNAScores) => number;
+  low: string;
+  high: string;
+  from: string;
+  to: string;
 }
+
+const AXES: Axis[] = [
+  {
+    label: "Energy",
+    getValue: (s) => s.final_energy,
+    low: "Chill",
+    high: "Pumped",
+    from: "#f59e0b",
+    to: "#ef4444",
+  },
+  {
+    label: "Mood",
+    getValue: (s) => s.valence_score,
+    low: "Dark",
+    high: "Euphoric",
+    from: "#6366f1",
+    to: "#ec4899",
+  },
+  {
+    label: "Taste",
+    getValue: (s) => 1 - s.popularity_score,
+    low: "Mainstream",
+    high: "Offbeat",
+    from: "#06b6d4",
+    to: "#14b8a6",
+  },
+  {
+    label: "Range",
+    getValue: (s) => s.range_score,
+    low: "Focused",
+    high: "Wide",
+    from: "#3b82f6",
+    to: "#8b5cf6",
+  },
+  {
+    label: "Depth",
+    getValue: (s) => s.depth_score,
+    low: "Repeat Listener",
+    high: "Explorer",
+    from: "#10b981",
+    to: "#84cc16",
+  },
+  {
+    label: "Tempo",
+    getValue: (s) => s.tempo_score,
+    low: "Slow",
+    high: "Fast",
+    from: "#f97316",
+    to: "#fbbf24",
+  },
+  {
+    label: "Raw Energy",
+    getValue: (s) => s.energy_score,
+    low: "Mellow",
+    high: "Intense",
+    from: "#e11d48",
+    to: "#fb7185",
+  },
+];
+
+// ─── Pages ────────────────────────────────────────────────────────────────────
 
 export default async function Home() {
   const cookieStore = await cookies();
   const token = cookieStore.get("spotify_access_token")?.value;
 
-  const track = token ? await getRecentlyPlayed(token) : null;
-  const albumArt = track?.album.images[0];
+  if (!token) {
+    return (
+      <div
+        className="flex min-h-screen flex-col items-center justify-center gap-8 px-4"
+        style={{ background: "#0b0b0f" }}
+      >
+        <div className="text-center">
+          <h1 className="text-5xl font-bold tracking-tight text-white">
+            Music DNA
+          </h1>
+          <p className="mt-3 text-lg" style={{ color: "rgba(255,255,255,0.35)" }}>
+            Discover what your music says about you.
+          </p>
+        </div>
+        <LoginButton />
+      </div>
+    );
+  }
+
+  const scores = await computeMusicDNA(token);
 
   return (
-    <div className="flex min-h-screen flex-col items-center justify-center gap-8 bg-background px-4">
+    <div
+      className="flex min-h-screen flex-col items-center justify-center gap-12 px-6 py-20"
+      style={{ background: "#0b0b0f" }}
+    >
       <div className="text-center">
-        <h1 className="text-5xl font-bold tracking-tight text-foreground">
-          Saturday Morning
-        </h1>
-        <p className="mt-3 text-lg text-default-500">
-          Discover what your music says about you.
+        <p
+          className="mb-2 text-xs uppercase tracking-widest"
+          style={{ color: "rgba(255,255,255,0.25)" }}
+        >
+          Your listening fingerprint
         </p>
+        <h1 className="text-5xl font-bold tracking-tight text-white">
+          Music DNA
+        </h1>
       </div>
 
-      {!token || !track ? (
-        <LoginButton />
-      ) : (
-        <div className="flex flex-col items-center gap-6">
-          <p className="text-sm font-medium uppercase tracking-widest text-default-400">
-            Last played
-          </p>
-          <a
-            href={track.external_urls.spotify}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="flex items-center gap-5 rounded-2xl border border-default-200 bg-default-50 p-5 shadow-sm transition hover:shadow-md"
-          >
-            {albumArt && (
-              <Image
-                src={albumArt.url}
-                alt={track.album.name}
-                width={80}
-                height={80}
-                className="rounded-xl"
-              />
-            )}
-            <div>
-              <p className="text-lg font-semibold text-foreground">
-                {track.name}
-              </p>
-              <p className="text-default-500">
-                {track.artists.map((a) => a.name).join(", ")}
-              </p>
-              <p className="text-sm text-default-400">{track.album.name}</p>
-            </div>
-          </a>
-          <LogoutButton />
-        </div>
-      )}
+      <div className="flex w-full max-w-sm flex-col gap-8">
+        {AXES.map((axis) => (
+          <ScoreBar
+            key={axis.label}
+            label={axis.label}
+            value={axis.getValue(scores)}
+            low={axis.low}
+            high={axis.high}
+            fromColor={axis.from}
+            toColor={axis.to}
+          />
+        ))}
+      </div>
+
+      <div style={{ color: "rgba(255,255,255,0.2)", fontSize: "0.7rem" }}>
+        Based on your last {scores.raw.total_plays} plays · {scores.raw.unique_tracks} unique tracks
+      </div>
+
+      <LogoutButton />
     </div>
   );
 }
