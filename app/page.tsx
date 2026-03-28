@@ -58,20 +58,12 @@ const AXES: {
   to: string;
 }[] = [
   {
-    label: "Taste",
-    getValue: (s) => s.taste,
-    low: "Pop",
-    high: "Offbeat",
-    from: "#06b6d4",
-    to: "#14b8a6",
-  },
-  {
-    label: "Range",
-    getValue: (s) => s.range,
-    low: "Focused",
-    high: "Wide",
-    from: "#3b82f6",
-    to: "#8b5cf6",
+    label: "Discovery",
+    getValue: (s) => s.discovery,
+    low: "Loyalist",
+    high: "Explorer",
+    from: "#6366f1",
+    to: "#a78bfa",
   },
   {
     label: "Energy",
@@ -82,12 +74,20 @@ const AXES: {
     to: "#ef4444",
   },
   {
-    label: "Depth",
-    getValue: (s) => s.depth,
-    low: "Repeat Listener",
-    high: "Explorer",
-    from: "#10b981",
-    to: "#84cc16",
+    label: "Involvement",
+    getValue: (s) => s.involvement,
+    low: "Ambient",
+    high: "Vocal",
+    from: "#06b6d4",
+    to: "#3b82f6",
+  },
+  {
+    label: "Mood",
+    getValue: (s) => s.mood,
+    low: "Dark",
+    high: "Euphoric",
+    from: "#8b5cf6",
+    to: "#f472b6",
   },
 ];
 
@@ -107,7 +107,6 @@ export default async function Home() {
     }
   }
 
-  // Not logged in, or token missing user-top-read scope (scores === null)
   if (!scores) {
     return (
       <div
@@ -162,7 +161,7 @@ export default async function Home() {
         className="text-center"
         style={{ color: "rgba(255,255,255,0.2)", fontSize: "0.7rem" }}
       >
-        {scores.meta.total_tracks} tracks · {scores.meta.unique_genres} genres
+        {scores.meta.total_tracks} tracks · {scores.meta.unique_artists} artists · {scores.meta.tags_found} tags
       </p>
 
       <LogoutButton />

@@ -1,14 +1,16 @@
+import {
+  fetchTagsForArtists,
+  scoreEnergy,
+  scoreInvolvement,
+  scoreMood,
+} from "./lastfm";
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface SpotifyTrack {
   id: string;
   popularity: number | null;
-  artists: { id: string }[];
-}
-
-interface SpotifyArtist {
-  id: string;
-  genres: string[];
+  artists: { id: string; name: string }[];
 }
 
 interface PlayHistoryItem {
@@ -16,15 +18,16 @@ interface PlayHistoryItem {
 }
 
 export interface MusicDNAScores {
-  taste: number;  // 0 = mainstream, 1 = offbeat
-  range: number;  // 0 = focused, 1 = wide
-  energy: number; // 0 = chill, 1 = pumped
-  depth: number;  // 0 = repeat listener, 1 = explorer
+  discovery: number;   // 0 = loyalist,  1 = explorer
+  energy: number;      // 0 = chill,     1 = pumped
+  involvement: number; // 0 = ambient,   1 = vocal/active
+  mood: number;        // 0 = dark,      1 = euphoric
   meta: {
     total_tracks: number;
-    unique_genres: number;
+    unique_artists: number;
     total_plays: number;
     unique_recent: number;
+    tags_found: number;
   };
 }
 
@@ -36,16 +39,6 @@ function clamp(v: number, min: number, max: number): number {
 
 function normalize(v: number, min: number, max: number): number {
   return clamp((v - min) / (max - min), 0, 1);
-}
-
-function mean(arr: number[]): number {
-  return arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
-}
-
-function stdDev(arr: number[]): number {
-  if (arr.length < 2) return 0;
-  const avg = mean(arr);
-  return Math.sqrt(mean(arr.map((v) => Math.pow(v - avg, 2))));
 }
 
 function dedupById<T extends { id: string }>(arr: T[]): T[] {
@@ -85,26 +78,6 @@ async function fetchTopTracks(
   return data?.items ?? [];
 }
 
-// Batch-fetch full artist objects (genres, popularity) for a list of IDs.
-// Uses /artists?ids= which is more reliable for genre data than /me/top/artists.
-// Spotify allows up to 50 IDs per request.
-async function fetchArtistDetails(
-  token: string,
-  artistIds: string[]
-): Promise<SpotifyArtist[]> {
-  if (artistIds.length === 0) return [];
-  const results: SpotifyArtist[] = [];
-  for (let i = 0; i < artistIds.length; i += 50) {
-    const batch = artistIds.slice(i, i + 50).join(",");
-    const data = await spotifyGet<{ artists: SpotifyArtist[] }>(
-      `https://api.spotify.com/v1/artists?ids=${batch}`,
-      token
-    );
-    if (data?.artists) results.push(...data.artists.filter(Boolean));
-  }
-  return results;
-}
-
 async function fetchRecentlyPlayed(token: string): Promise<PlayHistoryItem[]> {
   const data = await spotifyGet<{ items: PlayHistoryItem[] }>(
     "https://api.spotify.com/v1/me/player/recently-played?limit=50",
@@ -113,36 +86,12 @@ async function fetchRecentlyPlayed(token: string): Promise<PlayHistoryItem[]> {
   return data?.items ?? [];
 }
 
-// ─── Energy keyword mapping ───────────────────────────────────────────────────
-
-const HIGH_ENERGY = [
-  "metal", "punk", "hardcore", "edm", "house", "techno", "drum and bass",
-  "dnb", "trap", "drill", "rave", "hardstyle", "trance", "industrial",
-  "grunge", "rock", "hip hop", "rap", "rage", "breakbeat", "jungle",
-  "gabber", "psytrance", "speed metal", "thrash", "death metal", "black metal",
-  "dubstep", "bass", "club", "dance",
-];
-
-const LOW_ENERGY = [
-  "ambient", "acoustic", "classical", "folk", "sleep", "meditation",
-  "lo-fi", "lofi", "soft", "singer-songwriter", "new age", "piano",
-  "choral", "lullaby", "chill", "orchestral", "chamber", "baroque",
-  "impressionist", "slowcore", "drone", "post-classical",
-];
-
-function genreEnergyScore(genre: string): number {
-  const g = genre.toLowerCase();
-  if (HIGH_ENERGY.some((k) => g.includes(k))) return 1;
-  if (LOW_ENERGY.some((k) => g.includes(k))) return -1;
-  return 0;
-}
-
 // ─── Main computation ─────────────────────────────────────────────────────────
 
 export async function computeMusicDNA(
   token: string
 ): Promise<MusicDNAScores | null> {
-  // Step 1: fetch top tracks (all time ranges) + recently played in parallel
+  // Step 1: all Spotify calls in parallel
   const [shortTracks, medTracks, longTracks, recentPlays] = await Promise.all([
     fetchTopTracks(token, "short_term"),
     fetchTopTracks(token, "medium_term"),
@@ -150,69 +99,84 @@ export async function computeMusicDNA(
     fetchRecentlyPlayed(token),
   ]);
 
-  // No top tracks = missing user-top-read scope, needs re-auth
+  // No top tracks = missing user-top-read scope → prompt re-auth
   if (!shortTracks.length && !medTracks.length && !longTracks.length) {
     return null;
   }
 
   const allTracks = dedupById([...shortTracks, ...medTracks, ...longTracks]);
 
-  // Step 2: fetch artist details using IDs from the tracks themselves.
-  // /artists?ids= is more reliable for genre data than /me/top/artists.
-  const artistIds = [
-    ...new Set(
-      allTracks.flatMap((t) => t.artists?.map((a) => a.id) ?? [])
-    ),
-  ];
-  const artists = await fetchArtistDetails(token, artistIds);
+  // Build artist frequency map: artists who appear in more tracks are weighted
+  // higher when we pick which ones to query Last.fm for.
+  const artistFrequency = new Map<string, { name: string; count: number }>();
+  for (const track of allTracks) {
+    for (const artist of track.artists ?? []) {
+      const existing = artistFrequency.get(artist.id);
+      if (existing) {
+        existing.count++;
+      } else {
+        artistFrequency.set(artist.id, { name: artist.name, count: 1 });
+      }
+    }
+  }
 
-  // ── TASTE: mainstream vs offbeat ──────────────────────────────────────────
-  // popularity can be null in the API; default missing values to 50 (neutral)
-  // so absent data doesn't distort the score toward either extreme.
-  const popularities = allTracks.map((t) =>
-    typeof t.popularity === "number" && !isNaN(t.popularity) ? t.popularity : 50
+  // Sort by frequency so the most-listened artists are prioritised in Last.fm
+  const sortedArtists = [...artistFrequency.values()].sort(
+    (a, b) => b.count - a.count
   );
-  const avgPopularity = mean(popularities);
-  const taste = 1 - normalize(avgPopularity, 0, 100);
+  const artistNames = sortedArtists.map((a) => a.name);
+  const uniqueArtistCount = artistFrequency.size;
 
-  // ── RANGE: focused vs wide ────────────────────────────────────────────────
-  const allGenres = artists
-    .flatMap((a) => a.genres ?? [])
-    .filter((g): g is string => typeof g === "string" && g.length > 0);
-  const uniqueGenres = new Set(allGenres);
-  const genre_score = clamp(uniqueGenres.size / 25, 0, 1);
-  const spread_score = normalize(stdDev(popularities), 0, 35);
-  const range = 0.7 * genre_score + 0.3 * spread_score;
+  // Step 2: fetch Last.fm tags for top 30 artists (in parallel)
+  const lastfmApiKey = process.env.LASTFM_API_KEY ?? "";
+  const allTags = await fetchTagsForArtists(artistNames, lastfmApiKey);
 
-  // ── ENERGY: chill vs pumped ───────────────────────────────────────────────
-  const energyScores = allGenres.map(genreEnergyScore);
-  const energy = energyScores.length > 0
-    ? normalize(mean(energyScores), -1, 1)
-    : 0.5;
+  // ── DISCOVERY: loyalist → explorer ────────────────────────────────────────
+  // Signal 1 — artist density: unique artists relative to track count.
+  // Range: ~0.05 (one artist, many tracks) to ~1.0 (one artist per track).
+  const artistDensity = normalize(
+    uniqueArtistCount / allTracks.length,
+    0.05,
+    0.9
+  );
 
-  // ── DEPTH: repeat listener vs explorer ────────────────────────────────────
-  const shortIds = new Set(shortTracks.map((t) => t.id));
-  const longIds = new Set(longTracks.map((t) => t.id));
-  const overlap = [...shortIds].filter((id) => longIds.has(id)).length;
-  const minSize = Math.min(shortIds.size, longIds.size);
-  const cross_depth = minSize > 0 ? 1 - overlap / minSize : 0.5;
+  // Signal 2 — cross-time drift: if your short-term and long-term top artists
+  // are totally different, you're constantly exploring new ones.
+  const shortArtistIds = new Set(
+    shortTracks.flatMap((t) => t.artists?.map((a) => a.id) ?? [])
+  );
+  const longArtistIds = new Set(
+    longTracks.flatMap((t) => t.artists?.map((a) => a.id) ?? [])
+  );
+  const artistOverlap = [...shortArtistIds].filter((id) =>
+    longArtistIds.has(id)
+  ).length;
+  const minArtistSize = Math.min(shortArtistIds.size, longArtistIds.size);
+  const crossTimeDrift =
+    minArtistSize > 0 ? 1 - artistOverlap / minArtistSize : 0.5;
 
+  const discovery = clamp(0.6 * artistDensity + 0.4 * crossTimeDrift, 0, 1);
+
+  // ── ENERGY, INVOLVEMENT, MOOD: scored from Last.fm tags ───────────────────
+  const energy = scoreEnergy(allTags);
+  const involvement = scoreInvolvement(allTags);
+  const mood = scoreMood(allTags);
+
+  // Recently played stats for meta
   const totalPlays = recentPlays.length;
   const uniqueRecent = new Set(recentPlays.map((i) => i.track.id)).size;
-  const recent_depth = totalPlays > 0 ? uniqueRecent / totalPlays : 0.5;
-
-  const depth = 0.65 * cross_depth + 0.35 * recent_depth;
 
   return {
-    taste,
-    range,
+    discovery,
     energy,
-    depth,
+    involvement,
+    mood,
     meta: {
       total_tracks: allTracks.length,
-      unique_genres: uniqueGenres.size,
+      unique_artists: uniqueArtistCount,
       total_plays: totalPlays,
       unique_recent: uniqueRecent,
+      tags_found: allTags.length,
     },
   };
 }
