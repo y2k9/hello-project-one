@@ -60,12 +60,16 @@ function dedupById<T extends { id: string }>(arr: T[]): T[] {
 // ─── Spotify fetch helper ─────────────────────────────────────────────────────
 
 async function spotifyGet<T>(url: string, token: string): Promise<T | null> {
-  const res = await fetch(url, {
-    headers: { Authorization: `Bearer ${token}` },
-    cache: "no-store",
-  });
-  if (!res.ok) return null;
-  return (await res.json()) as T;
+  try {
+    const res = await fetch(url, {
+      headers: { Authorization: `Bearer ${token}` },
+      cache: "no-store",
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as T;
+  } catch {
+    return null;
+  }
 }
 
 // ─── API calls ────────────────────────────────────────────────────────────────

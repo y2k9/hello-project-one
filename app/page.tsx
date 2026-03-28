@@ -97,7 +97,15 @@ export default async function Home() {
   const cookieStore = await cookies();
   const token = cookieStore.get("spotify_access_token")?.value;
 
-  const scores = token ? await computeMusicDNA(token) : null;
+  let scores = null;
+  if (token) {
+    try {
+      scores = await computeMusicDNA(token);
+    } catch (err) {
+      console.error("[MusicDNA] computeMusicDNA threw:", err);
+      scores = null;
+    }
+  }
 
   // Not logged in, or token missing user-top-read scope (scores === null)
   if (!scores) {
